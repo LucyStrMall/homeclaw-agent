@@ -15,6 +15,7 @@ from .token_estimator import (
     compute_context_budget,
     estimate_messages_tokens,
 )
+from .hallucination_guard import build_correction_prompt, detect_hallucinated_actions
 from .tool_call_codec import build_assistant_tool_message, normalize_tool_calls
 from .tool_executor import ToolExecutor
 
@@ -599,6 +600,7 @@ class QueryProcessor:
         hass = kwargs.get("hass")
         current_iteration = 0
         call_history_hashes: dict[str, int] = {}
+        hallucination_retries = 0
 
         from ..tools.base import ToolRegistry
         allowed_names = {t.id for t in ToolRegistry.get_all_tools(hass=None, enabled_only=True)}
@@ -639,6 +641,21 @@ class QueryProcessor:
                         yield TextEvent(content=response_text)
 
                     if not function_calls:
+                        hal_result = detect_hallucinated_actions(response_text, tool_calls_made=[])
+                        if hal_result["hallucinated"] and hallucination_retries < 2:
+                            hallucination_retries += 1
+                            _LOGGER.warning(
+                                "Hallucination detected (retry %d/2): %s",
+                                hallucination_retries,
+                                hal_result["reason"],
+                            )
+                            built_messages.append({"role": "assistant", "content": response_text})
+                            built_messages.append({"role": "user", "content": build_correction_prompt(hal_result)})
+                            current_iteration += 1
+                            continue
+                        elif hal_result["hallucinated"]:
+                            _LOGGER.warning("Hallucination guard: max retries reached, returning response as-is")
+
                         # No function call, return the response
                         updated_messages = list(built_messages)
                         if (
@@ -852,6 +869,21 @@ class QueryProcessor:
                     len(accumulated_text),
                 )
 
+                hal_result = detect_hallucinated_actions(accumulated_text, tool_calls_made=[])
+                if hal_result["hallucinated"] and hallucination_retries < 2:
+                    hallucination_retries += 1
+                    _LOGGER.warning(
+                        "Hallucination detected (retry %d/2): %s",
+                        hallucination_retries,
+                        hal_result["reason"],
+                    )
+                    built_messages.append({"role": "assistant", "content": accumulated_text})
+                    built_messages.append({"role": "user", "content": build_correction_prompt(hal_result)})
+                    current_iteration += 1
+                    continue
+                elif hal_result["hallucinated"]:
+                    _LOGGER.warning("Hallucination guard: max retries reached, returning response as-is")
+
                 updated_messages = list(built_messages)
                 if (
                     system_prompt
@@ -992,6 +1024,7 @@ class QueryProcessor:
         hass = kwargs.get("hass")
         current_iteration = 0
         call_history_hashes: dict[str, int] = {}
+        hallucination_retries_p = 0
 
         from ..tools.base import ToolRegistry
         allowed_names_p = {t.id for t in ToolRegistry.get_all_tools(hass=None, enabled_only=True)}
@@ -1011,6 +1044,21 @@ class QueryProcessor:
                 function_calls = self._detect_function_call(response_text, allowed_tool_names=allowed_names_p)
 
                 if not function_calls:
+                    hal_result = detect_hallucinated_actions(response_text, tool_calls_made=[])
+                    if hal_result["hallucinated"] and hallucination_retries_p < 2:
+                        hallucination_retries_p += 1
+                        _LOGGER.warning(
+                            "Hallucination detected (retry %d/2): %s",
+                            hallucination_retries_p,
+                            hal_result["reason"],
+                        )
+                        built_messages.append({"role": "assistant", "content": response_text})
+                        built_messages.append({"role": "user", "content": build_correction_prompt(hal_result)})
+                        current_iteration += 1
+                        continue
+                    elif hal_result["hallucinated"]:
+                        _LOGGER.warning("Hallucination guard: max retries reached, returning response as-is")
+
                     # No function call, return the response
                     # Build the updated message list with the response
                     updated_messages = list(built_messages)
